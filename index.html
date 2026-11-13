@@ -480,9 +480,9 @@ textarea{resize:vertical;min-height:60px}
   <!-- ── ACC ── -->
   <div class="card">
     <div class="card-title">ACC levies (estimate)</div>
-    <div style="font-size:12px;color:var(--text3);line-height:1.6;margin-bottom:12px"><span id="accIntro">Earner's levy applies to liable income up to a yearly cap.</span> Your work levy depends on your industry classification (CU) code. Find the rate per $100 on your ACC invoice or ACC's levy guide and enter it here.</div>
+    <div style="font-size:12px;color:var(--text3);line-height:1.6;margin-bottom:12px"><span id="accIntro">Earner's levy applies to liable income up to a yearly cap.</span> Your work levy depends on your industry classification (CU) code. Your first ACC invoice shows the rate per $100. Leave this blank until then; you can come back and enter it any time and it's saved.</div>
     <div class="form-grid" style="margin-bottom:10px">
-      <div><label>Work levy rate ($ per $100 of earnings)</label><input type="number" id="accWorkLevy" placeholder="e.g. 0.69" min="0" step="0.01" oninput="setTaxOpt('workLevy',parseFloat(this.value)||0);recalcTax()"></div>
+      <div><label>Work levy rate ($ per $100 of earnings)</label><input type="number" id="accWorkLevy" placeholder="e.g. 0.69" min="0" step="0.01" oninput="setTaxOpt('workLevy',parseFloat(this.value)||0);scheduleSave();recalcTax()"></div>
     </div>
     <div id="accSummary"></div>
     <div style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px">
@@ -989,6 +989,10 @@ const FUEL_LABELS={petrol:'Petrol',diesel:'Diesel',hybrid:'Petrol hybrid',electr
 function taxOpts(){
   try{ return Object.assign({fuel:'petrol',workLevy:0},JSON.parse(localStorage.getItem('nz_tax_opts')||'{}')); }
   catch(e){ return {fuel:'petrol',workLevy:0}; }
+}
+function restoreTaxOpts(o){
+  try{ localStorage.setItem('nz_tax_opts',JSON.stringify(o)); }catch(e){}
+  if(typeof updateFYBadge==='function') updateFYBadge(); // refresh inputs and labels
 }
 function setTaxOpt(k,v){
   const o=taxOpts(); o[k]=v;
@@ -2745,7 +2749,7 @@ function recalcTax(){
       ${bracketRows}
       <div class="row-item fw" style="border-top:1px solid var(--border);padding-top:8px"><span class="row-label fw">Income tax (estimated)</span><span class="row-val c-amber fw">${fmt(estimatedTax)}</span></div>
       <div class="row-item"><span class="row-label">ACC earner levy (${accRateLabel()})</span><span class="row-val c-amber">${fmt(accEarner)}</span></div>
-      <div class="row-item"><span class="row-label">ACC work + Working Safer levy${taxOpts().workLevy?'':' (set your work levy rate below)'}</span><span class="row-val c-amber">${fmt(accWork.total)}</span></div>
+      <div class="row-item"><span class="row-label">ACC work + Working Safer levy${taxOpts().workLevy?'':' (excludes work levy until you enter your rate)'}</span><span class="row-val c-amber">${fmt(accWork.total)}</span></div>
       ${slHas?`<div class="row-item"><span class="row-label">Student loan (${taxYearRates().slRate*100}%)</span><span class="row-val c-amber">${fmt(slRepay)}</span></div>`:''}
       <div class="row-item fw" style="font-size:14px;margin-bottom:4px"><span class="row-label fw">Total obligation (estimated)</span><span class="row-val c-red fw">${fmt(estimatedTax+accLevy+slRepay)}</span></div>
       <div class="row-item" style="font-size:11px;color:var(--text3)"><span>Effective tax rate</span><span>${taxable>0?(estimatedTax/taxable*100).toFixed(1)+'%':'—'}</span></div>
@@ -2812,6 +2816,7 @@ function recalcTax(){
     <div class="row-item"><span class="row-label">Work levy (${taxOpts().workLevy?'$'+(+taxOpts().workLevy).toFixed(2)+' per $100':'not set'})</span><span class="row-val c-amber">${fmt(accWork.work)}</span></div>
     <div class="row-item"><span class="row-label">Working Safer levy ($${(taxYearRates().workSaferRate*100).toFixed(2)} per $100)</span><span class="row-val c-amber">${fmt(accWork.safer)}</span></div>
     <div class="row-item fw"><span class="row-label fw">Total ACC levies</span><span class="row-val c-amber fw">${fmt(accLevy)}</span></div>
+    ${taxOpts().workLevy?'':'<div class="info-box" style="margin:8px 0">This total doesn\'t include your work levy yet. Enter your rate above once your ACC invoice arrives.</div>'}
     <div class="row-item"><span class="row-label">ACC paid to date</span><span class="row-val c-green">${fmt(accPaid)}</span></div>
     <div class="row-item fw"><span class="row-label fw">ACC still owing</span><span class="row-val ${accLevy-accPaid>0?'c-red':'c-green'} fw">${fmt(Math.max(0,accLevy-accPaid))}</span></div>`;
 
@@ -2973,7 +2978,7 @@ function exportCSV(){
 
 // ── Backup & Restore ──
 function backupData(){
-  const backup={version:3,exportedAt:new Date().toISOString(),entries,assets,vehicles,clients,invoices,bizInfo,schedules};
+  const backup={version:3,exportedAt:new Date().toISOString(),entries,assets,vehicles,clients,invoices,bizInfo,schedules,taxOpts:taxOpts()};
   const blob=new Blob([JSON.stringify(backup,null,2)],{type:'application/json'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
   const d=new Date();
@@ -2994,6 +2999,7 @@ function importData(event){
       entries=data.entries||[]; assets=data.assets||[]; vehicles=data.vehicles||[];
       clients=data.clients||[]; invoices=data.invoices||[]; bizInfo=data.bizInfo||{};
       schedules=data.schedules||[];
+      if(data.taxOpts) restoreTaxOpts(data.taxOpts);
       persistLocal();
       renderAll();
       // Force immediate Drive save so the restored data overwrites Drive before any pull can happen
@@ -3239,6 +3245,7 @@ async function loadFromDrive(checkConflict){
       invoices  = data.invoices  || [];
       bizInfo   = data.bizInfo   || {};
       schedules = data.schedules || [];
+      if(data.taxOpts) restoreTaxOpts(data.taxOpts);
       // Persist to localStorage as offline cache
       persistLocal();
       processSchedules();
@@ -3267,7 +3274,7 @@ async function doSaveToDrive(){
   try{
     const payload = JSON.stringify({
       version:4, savedAt:new Date().toISOString(),
-      entries, assets, vehicles, clients, invoices, bizInfo, schedules
+      entries, assets, vehicles, clients, invoices, bizInfo, schedules, taxOpts:taxOpts()
     });
     const found = gDriveFileId ? true : await findDriveFile();
     let url, method;
