@@ -477,7 +477,7 @@ textarea{resize:vertical;min-height:60px}
   <!-- ── ACC ── -->
   <div class="card">
     <div class="card-title">ACC levies (estimate)</div>
-    <div style="font-size:12px;color:var(--text3);line-height:1.6;margin-bottom:12px">Earner's levy (1.67%) applies to all income up to $152,790. Work levy depends on industry code.</div>
+    <div style="font-size:12px;color:var(--text3);line-height:1.6;margin-bottom:12px"><span id="accIntro">Earner's levy applies to liable income up to a yearly cap.</span> Work levy depends on industry code.</div>
     <div id="accSummary"></div>
     <div style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px">
       <div style="font-size:12px;font-weight:600;margin-bottom:8px;color:var(--text2)">Record ACC payment</div>
@@ -962,13 +962,34 @@ function fmt(n){ return 'NZ$'+Math.abs(n).toLocaleString('en-NZ',{minimumFractio
 function fmtN(n){ return (n<0?'−':'')+fmt(n); }
 function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
-// ── NZ Tax 2025/26 ──
+// ── NZ tax rates by FY (keyed by the year the FY starts, 1 April) ──
+// Income tax brackets in force from 31 July 2024; full-year rates from FY 2025/26.
+const NZ_BRACKETS_2025=[{max:15600,r:0.105},{max:53500,r:0.175},{max:78100,r:0.30},{max:180000,r:0.33},{max:Infinity,r:0.39}];
+const NZ_TAX_YEARS={
+  2025:{brackets:NZ_BRACKETS_2025,accRate:0.0167,accCap:152790}, // FY 2025/26
+  2026:{brackets:NZ_BRACKETS_2025,accRate:0.0175,accCap:156641}, // FY 2026/27
+};
+function taxYearRates(){
+  const y=parseInt(currentFYStart(),10);
+  if(NZ_TAX_YEARS[y]) return NZ_TAX_YEARS[y];
+  // Unknown year: fall back to the latest year we have rates for
+  const years=Object.keys(NZ_TAX_YEARS).map(Number).sort((a,b)=>a-b);
+  return NZ_TAX_YEARS[years.filter(k=>k<=y).pop()??years[0]];
+}
 function calcNZTax(income){
   if(income<=0) return 0;
-  const b=[{max:14000,r:0.105},{max:48000,r:0.175},{max:70000,r:0.30},{max:180000,r:0.33},{max:Infinity,r:0.39}];
   let tax=0,prev=0;
-  for(const x of b){ if(income<=prev) break; tax+=(Math.min(income,x.max)-prev)*x.r; prev=x.max; }
+  for(const x of taxYearRates().brackets){ if(income<=prev) break; tax+=(Math.min(income,x.max)-prev)*x.r; prev=x.max; }
   return tax;
+}
+function calcACCEarnerLevy(income){
+  const t=taxYearRates();
+  return Math.min(Math.max(0,income),t.accCap)*t.accRate;
+}
+function accRateLabel(){ return (taxYearRates().accRate*100).toFixed(2).replace(/0$/,'')+'%'; }
+function bracketLabel(prev,max){
+  const n=v=>'$'+v.toLocaleString('en-NZ');
+  return max===Infinity?n(prev+1)+'+':(prev===0?'$0':n(prev+1))+' – '+n(max);
 }
 
 // ── Pages ──
@@ -2364,7 +2385,7 @@ function recalcSidebar(){
   const sbAnnualInc=mInc*12, sbAnnualExp=mExp*12;
   const sbTaxable=Math.max(0,sbAnnualInc-sbAnnualExp-sbTotalDep-sbVDed-sbHoDed);
   const annualTax=calcNZTax(sbTaxable);
-  const accLevy=Math.min(sbTaxable,152790)*0.0167;
+  const accLevy=calcACCEarnerLevy(sbTaxable);
   const mTax=annualTax/12, mACC=accLevy/12;
 
   // Monthly = recurring only. Also calculate one-offs that occurred this month separately.
@@ -2558,7 +2579,7 @@ function recalcTax(){
   });
   const taxable=Math.max(0,annualInc-annualExp-totalDep-vDed-hoDed+fxNetVar);
   const estimatedTax=calcNZTax(taxable);
-  const accLevy=Math.min(taxable,152790)*0.0167;
+  const accLevy=calcACCEarnerLevy(taxable);
   const slEl=document.getElementById('slHas');
   const slHas=slEl?slEl.value==='yes':false;
   const slRepay=slHas?Math.max(0,(taxable-24128)*0.12):0;
@@ -2596,7 +2617,8 @@ function recalcTax(){
   if(annualInc===0){
     document.getElementById('taxBreakdown').innerHTML='<div class="empty" style="padding:16px 0">Add income entries to see your estimate.</div>';
   } else {
-    const brackets=[{label:'$0 – $14,000',rate:10.5,max:14000},{label:'$14,001 – $48,000',rate:17.5,max:48000},{label:'$48,001 – $70,000',rate:30,max:70000},{label:'$70,001 – $180,000',rate:33,max:180000},{label:'$180,001+',rate:39,max:Infinity}];
+    let bp=0;
+    const brackets=taxYearRates().brackets.map(x=>{const b={label:bracketLabel(bp,x.max),rate:+(x.r*100).toFixed(2),max:x.max};bp=x.max;return b;});
     let bracketRows='',prev=0;
     brackets.forEach(b=>{
       if(taxable<=prev) return;
@@ -2668,7 +2690,7 @@ function recalcTax(){
       <div style="height:10px"></div>
       ${bracketRows}
       <div class="row-item fw" style="border-top:1px solid var(--border);padding-top:8px"><span class="row-label fw">Income tax (estimated)</span><span class="row-val c-amber fw">${fmt(estimatedTax)}</span></div>
-      <div class="row-item"><span class="row-label">ACC earner levy (1.67%)</span><span class="row-val c-amber">${fmt(accLevy)}</span></div>
+      <div class="row-item"><span class="row-label">ACC earner levy (${accRateLabel()})</span><span class="row-val c-amber">${fmt(accLevy)}</span></div>
       ${slHas?`<div class="row-item"><span class="row-label">Student loan (12%)</span><span class="row-val c-amber">${fmt(slRepay)}</span></div>`:''}
       <div class="row-item fw" style="font-size:14px;margin-bottom:4px"><span class="row-label fw">Total obligation (estimated)</span><span class="row-val c-red fw">${fmt(estimatedTax+accLevy+slRepay)}</span></div>
       <div class="row-item" style="font-size:11px;color:var(--text3)"><span>Effective tax rate</span><span>${taxable>0?(estimatedTax/taxable*100).toFixed(1)+'%':'—'}</span></div>
@@ -2730,8 +2752,8 @@ function recalcTax(){
       ${annualInc>=60000?'<div class="info-box">Turnover ≥ $60,000 — GST registration is mandatory.</div>':''}`;
 
   document.getElementById('accSummary').innerHTML=`
-    <div class="row-item"><span class="row-label">Liable earnings</span><span class="row-val">${fmt(Math.min(taxable,152790))}</span></div>
-    <div class="row-item"><span class="row-label">Earner levy (1.67%)</span><span class="row-val c-amber">${fmt(accLevy)}</span></div>
+    <div class="row-item"><span class="row-label">Liable earnings</span><span class="row-val">${fmt(Math.min(taxable,taxYearRates().accCap))}</span></div>
+    <div class="row-item"><span class="row-label">Earner levy (${accRateLabel()})</span><span class="row-val c-amber">${fmt(accLevy)}</span></div>
     <div class="row-item"><span class="row-label">ACC paid to date</span><span class="row-val c-green">${fmt(accPaid)}</span></div>
     <div class="row-item fw"><span class="row-label fw">ACC still owing</span><span class="row-val ${accLevy-accPaid>0?'c-red':'c-green'} fw">${fmt(Math.max(0,accLevy-accPaid))}</span></div>`;
 
@@ -2958,6 +2980,8 @@ function updateFYBadge(){
   const now=new Date(); const fy=now.getMonth()>=3?now.getFullYear():now.getFullYear()-1;
   const label=`FY ${fy}/${String(fy+1).slice(2)}`;
   document.getElementById('fyBadge').textContent=label;
+  const ai=document.getElementById('accIntro');
+  if(ai) ai.textContent=`Earner's levy (${accRateLabel()}) applies to liable income up to $${taxYearRates().accCap.toLocaleString('en-NZ')} for ${label}.`;
   const tc=document.getElementById('taxCardTitle');
   if(tc) tc.textContent=`Income tax estimate — ${label}`;
 }
