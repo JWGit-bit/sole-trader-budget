@@ -384,8 +384,11 @@ textarea{resize:vertical;min-height:60px}
 <!-- ══ VEHICLE / HOME OFFICE ══ -->
 <div class="page" id="page-vehicle">
   <div class="card">
-    <div class="card-title">Vehicle — mileage log <span class="badge badge-blue">IRD rate 2025/26: $0.35/km</span></div>
+    <div class="card-title">Vehicle — mileage log <span class="badge badge-blue" id="kmBadge">IRD km rate</span></div>
     <div class="form-grid">
+      <div class="full"><label>Vehicle type (sets the IRD km rate)</label>
+        <select id="vFuel" onchange="setTaxOpt('fuel',this.value);updateFYBadge();save()"><option value="petrol">Petrol</option><option value="diesel">Diesel</option><option value="hybrid">Petrol hybrid</option><option value="electric">Electric</option></select>
+      </div>
       <div><label>Date</label><input type="date" id="vDate"></div>
       <div><label>Purpose / destination</label><input type="text" id="vPurpose" placeholder="e.g. Client visit — Auckland CBD"></div>
       <div><label>Kilometres</label><input type="number" id="vKm" placeholder="0" min="0" step="0.1"></div>
@@ -477,7 +480,10 @@ textarea{resize:vertical;min-height:60px}
   <!-- ── ACC ── -->
   <div class="card">
     <div class="card-title">ACC levies (estimate)</div>
-    <div style="font-size:12px;color:var(--text3);line-height:1.6;margin-bottom:12px">Earner's levy (1.67%) applies to all income up to $152,790. Work levy depends on industry code.</div>
+    <div style="font-size:12px;color:var(--text3);line-height:1.6;margin-bottom:12px"><span id="accIntro">Earner's levy applies to liable income up to a yearly cap.</span> Your work levy depends on your industry classification (CU) code. Your first ACC invoice shows the rate per $100. Leave this blank until then; you can come back and enter it any time and it's saved.</div>
+    <div class="form-grid" style="margin-bottom:10px">
+      <div><label>Work levy rate ($ per $100 of earnings)</label><input type="number" id="accWorkLevy" placeholder="e.g. 0.69" min="0" step="0.01" oninput="setTaxOpt('workLevy',parseFloat(this.value)||0);scheduleSave();recalcTax()"></div>
+    </div>
     <div id="accSummary"></div>
     <div style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px">
       <div style="font-size:12px;font-weight:600;margin-bottom:8px;color:var(--text2)">Record ACC payment</div>
@@ -497,7 +503,7 @@ textarea{resize:vertical;min-height:60px}
       <div><label>Student loan?</label><select id="slHas" onchange="recalcTax()"><option value="no">No</option><option value="yes">Yes</option></select></div>
       <div><label>Outstanding balance NZ$</label><input type="number" id="slBalance" placeholder="0" min="0" oninput="recalcTax()"></div>
     </div>
-    <div id="slSummary" style="font-size:12px;color:var(--text3)">Repayment: 12% of income above $24,128 (2025/26).</div>
+    <div id="slSummary" style="font-size:12px;color:var(--text3)">Repayment: 12% of income above the yearly threshold.</div>
   </div>
 
   <!-- ── Home office (tax-linked) ── -->
@@ -950,7 +956,6 @@ let subTab = 'all';
 // Default business info cache
 let bizInfo = JSON.parse(localStorage.getItem('nz_bizinfo')||'{}');
 
-const KM_RATE = 0.35;
 
 // ── Defaults ──
 document.getElementById('aDate').value = today();
@@ -962,13 +967,85 @@ function fmt(n){ return 'NZ$'+Math.abs(n).toLocaleString('en-NZ',{minimumFractio
 function fmtN(n){ return (n<0?'−':'')+fmt(n); }
 function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
-// ── NZ Tax 2025/26 ──
+// ── NZ tax rates by FY (keyed by the year the FY starts, 1 April) ──
+// Income tax brackets in force from 31 July 2024; full-year rates from FY 2025/26.
+const NZ_BRACKETS_2025=[{max:15600,r:0.105},{max:53500,r:0.175},{max:78100,r:0.30},{max:180000,r:0.33},{max:Infinity,r:0.39}];
+// IRD kilometre rates per km: [Tier 1 (first 14,000 km), Tier 2]. IRD publishes these after the year ends.
+const KM_RATES_2025={petrol:[1.20,0.37],diesel:[1.30,0.38],hybrid:[0.90,0.24],electric:[1.22,0.23]};
+const NZ_TAX_YEARS={
+  2025:{ // FY 2025/26
+    brackets:NZ_BRACKETS_2025, accRate:0.0167, accCap:152790, workSaferRate:0.0008,
+    km:KM_RATES_2025, kmTier1Limit:14000, kmLabel:'2025/26',
+    slThreshold:24128, slRate:0.12,
+  },
+  2026:{ // FY 2026/27
+    brackets:NZ_BRACKETS_2025, accRate:0.0175, accCap:156641, workSaferRate:0.0008,
+    // 2026/27 km rates are not out until mid-2027; IRD says use the latest published (2025/26) meanwhile
+    km:KM_RATES_2025, kmTier1Limit:14000, kmLabel:'2025/26',
+    slThreshold:24128, slRate:0.12,
+  },
+};
+const FUEL_LABELS={petrol:'Petrol',diesel:'Diesel',hybrid:'Petrol hybrid',electric:'Electric'};
+function taxOpts(){
+  try{ return Object.assign({fuel:'petrol',workLevy:0},JSON.parse(localStorage.getItem('nz_tax_opts')||'{}')); }
+  catch(e){ return {fuel:'petrol',workLevy:0}; }
+}
+function restoreTaxOpts(o){
+  try{ localStorage.setItem('nz_tax_opts',JSON.stringify(o)); }catch(e){}
+  if(typeof updateFYBadge==='function') updateFYBadge(); // refresh inputs and labels
+}
+function setTaxOpt(k,v){
+  const o=taxOpts(); o[k]=v;
+  try{ localStorage.setItem('nz_tax_opts',JSON.stringify(o)); }catch(e){}
+}
+function taxYearRates(){
+  const y=parseInt(currentFYStart(),10);
+  if(NZ_TAX_YEARS[y]) return NZ_TAX_YEARS[y];
+  // Unknown year: fall back to the latest year we have rates for
+  const years=Object.keys(NZ_TAX_YEARS).map(Number).sort((a,b)=>a-b);
+  return NZ_TAX_YEARS[years.filter(k=>k<=y).pop()??years[0]];
+}
 function calcNZTax(income){
   if(income<=0) return 0;
-  const b=[{max:14000,r:0.105},{max:48000,r:0.175},{max:70000,r:0.30},{max:180000,r:0.33},{max:Infinity,r:0.39}];
   let tax=0,prev=0;
-  for(const x of b){ if(income<=prev) break; tax+=(Math.min(income,x.max)-prev)*x.r; prev=x.max; }
+  for(const x of taxYearRates().brackets){ if(income<=prev) break; tax+=(Math.min(income,x.max)-prev)*x.r; prev=x.max; }
   return tax;
+}
+function calcACCEarnerLevy(income){
+  const t=taxYearRates();
+  return Math.min(Math.max(0,income),t.accCap)*t.accRate;
+}
+// ACC work levy (rate per $100 for the user's classification unit) + Working Safer levy, self-employed only
+function calcACCWorkLevies(income){
+  const t=taxYearRates(), liable=Math.min(Math.max(0,income),t.accCap);
+  const work=liable*(taxOpts().workLevy||0)/100;
+  const safer=liable*t.workSaferRate;
+  return {work,safer,total:work+safer};
+}
+// Kilometre-rate deduction for this FY's trips, oldest first: Tier 1 for the first 14,000 km, then Tier 2
+function mileageAlloc(){
+  const t=taxYearRates(), fuel=taxOpts().fuel;
+  const [r1,r2]=t.km[fuel]||t.km.petrol;
+  const out={}; let used=0, total=0;
+  vehicles.filter(v=>v.method==='mileage'&&isFY(v.date))
+    .sort((a,b)=>new Date(a.date)-new Date(b.date))
+    .forEach(v=>{
+      const t1=Math.max(0,Math.min(v.km,t.kmTier1Limit-used));
+      const d=t1*r1+(v.km-t1)*r2;
+      used+=v.km; total+=d; out[v.id]=d;
+    });
+  out.total=total;
+  return out;
+}
+function calcMileageDed(){ return mileageAlloc().total; }
+function kmRateLabel(){
+  const t=taxYearRates(), fuel=taxOpts().fuel, [r1,r2]=t.km[fuel]||t.km.petrol;
+  return `IRD rate ${t.kmLabel} (${FUEL_LABELS[fuel]||'Petrol'}): $${r1.toFixed(2)}/km first ${t.kmTier1Limit.toLocaleString('en-NZ')} km, then $${r2.toFixed(2)}/km`;
+}
+function accRateLabel(){ return (taxYearRates().accRate*100).toFixed(2).replace(/0$/,'')+'%'; }
+function bracketLabel(prev,max){
+  const n=v=>'$'+v.toLocaleString('en-NZ');
+  return max===Infinity?n(prev+1)+'+':(prev===0?'$0':n(prev+1))+' – '+n(max);
 }
 
 // ── Pages ──
@@ -2303,6 +2380,7 @@ function renderVehicles(){
   const wrap=document.getElementById('vehicleTable');
   if(!vehicles.length){wrap.innerHTML='<div class="empty">No trips logged yet.</div>';return;}
   const sorted=[...vehicles].sort((a,b)=>new Date(b.date)-new Date(a.date));
+  const alloc=mileageAlloc();
   let html=`<table class="tbl"><thead><tr><th>Date</th><th>Purpose</th><th>km</th><th>Method</th><th>Deduction</th><th></th></tr></thead><tbody>`;
   sorted.forEach(v=>{
     html+=`<tr>
@@ -2310,7 +2388,7 @@ function renderVehicles(){
       <td style="font-size:12px">${esc(v.purpose)}</td>
       <td class="mono">${v.km.toFixed(1)}</td>
       <td style="font-size:11px;color:var(--text3)">${v.method==='mileage'?'IRD rate':'Actual'}</td>
-      <td class="mono c-blue">${fmt(v.km*KM_RATE)}</td>
+      <td class="mono c-blue">${v.id in alloc?fmt(alloc[v.id]):'<span title="Not claimed at the km rate this FY">—</span>'}</td>
       <td><button class="btn-del" onclick="deleteVehicle(${v.id})">✕</button></td>
     </tr>`;
   });
@@ -2320,11 +2398,11 @@ function renderVehicles(){
 
 function renderVehicleSummary(){
   const totalKm=vehicles.reduce((s,v)=>s+v.km,0);
-  const totalDed=vehicles.filter(v=>v.method==='mileage').reduce((s,v)=>s+v.km*KM_RATE,0);
+  const totalDed=calcMileageDed();
   document.getElementById('vehicleSummary').innerHTML=`
     <div class="sum-grid">
       <div class="sum-card"><div class="sum-label">Total km</div><div class="sum-val c-blue">${totalKm.toFixed(1)} km</div></div>
-      <div class="sum-card"><div class="sum-label">Total deduction</div><div class="sum-val c-green">${fmt(totalDed)}</div></div>
+      <div class="sum-card"><div class="sum-label">Deduction this FY</div><div class="sum-val c-green">${fmt(totalDed)}</div></div>
     </div>`;
 }
 
@@ -2359,12 +2437,12 @@ function recalcSidebar(){
   const mNet=mInc-mExp;
   // Use taxable income (after expenses, depreciation, home office, vehicle) for ACC — consistent with Tax tab
   let sbTotalDep=0; assets.forEach(a=>sbTotalDep+=calcDepreciation(a).annualDep);
-  const sbVDed=vehicles.filter(v=>v.method==='mileage').reduce((s,v)=>s+v.km*KM_RATE,0);
+  const sbVDed=calcMileageDed();
   const sbHoDed=calcHomeOfficeDed();
   const sbAnnualInc=mInc*12, sbAnnualExp=mExp*12;
   const sbTaxable=Math.max(0,sbAnnualInc-sbAnnualExp-sbTotalDep-sbVDed-sbHoDed);
   const annualTax=calcNZTax(sbTaxable);
-  const accLevy=Math.min(sbTaxable,152790)*0.0167;
+  const accLevy=calcACCEarnerLevy(sbTaxable)+calcACCWorkLevies(sbTaxable).total;
   const mTax=annualTax/12, mACC=accLevy/12;
 
   // Monthly = recurring only. Also calculate one-offs that occurred this month separately.
@@ -2397,7 +2475,7 @@ function recalcSidebar(){
   document.getElementById('sb-dep').textContent=fmt(totalDep);
   document.getElementById('sb-book').textContent=fmt(Math.max(0,totalCost-totalDep));
 
-  const vDed=vehicles.filter(v=>v.method==='mileage').reduce((s,v)=>s+v.km*KM_RATE,0);
+  const vDed=calcMileageDed();
   const taxable=fyInc-fyExp-totalDep-vDed;
   document.getElementById('sb-fy-inc').textContent=fmt(fyInc);
   document.getElementById('sb-fy-exp').textContent=fmt(fyExp);
@@ -2549,7 +2627,7 @@ function recalcTax(){
     else annualExp+=toFY(e.amount,e.freq,e.date,e.endDate);
   });
   let totalDep=0; assets.forEach(a=>totalDep+=calcDepreciation(a).annualDep);
-  const vDed=vehicles.filter(v=>v.method==='mileage').reduce((s,v)=>s+v.km*KM_RATE,0);
+  const vDed=calcMileageDed();
   const hoDed=calcHomeOfficeDed();
   // FX net variance: loss reduces taxable income, gain increases it
   let fxNetVar=0;
@@ -2558,10 +2636,11 @@ function recalcTax(){
   });
   const taxable=Math.max(0,annualInc-annualExp-totalDep-vDed-hoDed+fxNetVar);
   const estimatedTax=calcNZTax(taxable);
-  const accLevy=Math.min(taxable,152790)*0.0167;
+  const accEarner=calcACCEarnerLevy(taxable), accWork=calcACCWorkLevies(taxable);
+  const accLevy=accEarner+accWork.total;
   const slEl=document.getElementById('slHas');
   const slHas=slEl?slEl.value==='yes':false;
-  const slRepay=slHas?Math.max(0,(taxable-24128)*0.12):0;
+  const slRepay=slHas?Math.max(0,(taxable-taxYearRates().slThreshold)*taxYearRates().slRate):0;
 
   const rit=provSettings.rit||0;
   const provYear=provSettings.year||0;
@@ -2596,7 +2675,8 @@ function recalcTax(){
   if(annualInc===0){
     document.getElementById('taxBreakdown').innerHTML='<div class="empty" style="padding:16px 0">Add income entries to see your estimate.</div>';
   } else {
-    const brackets=[{label:'$0 – $14,000',rate:10.5,max:14000},{label:'$14,001 – $48,000',rate:17.5,max:48000},{label:'$48,001 – $70,000',rate:30,max:70000},{label:'$70,001 – $180,000',rate:33,max:180000},{label:'$180,001+',rate:39,max:Infinity}];
+    let bp=0;
+    const brackets=taxYearRates().brackets.map(x=>{const b={label:bracketLabel(bp,x.max),rate:+(x.r*100).toFixed(2),max:x.max};bp=x.max;return b;});
     let bracketRows='',prev=0;
     brackets.forEach(b=>{
       if(taxable<=prev) return;
@@ -2668,8 +2748,9 @@ function recalcTax(){
       <div style="height:10px"></div>
       ${bracketRows}
       <div class="row-item fw" style="border-top:1px solid var(--border);padding-top:8px"><span class="row-label fw">Income tax (estimated)</span><span class="row-val c-amber fw">${fmt(estimatedTax)}</span></div>
-      <div class="row-item"><span class="row-label">ACC earner levy (1.67%)</span><span class="row-val c-amber">${fmt(accLevy)}</span></div>
-      ${slHas?`<div class="row-item"><span class="row-label">Student loan (12%)</span><span class="row-val c-amber">${fmt(slRepay)}</span></div>`:''}
+      <div class="row-item"><span class="row-label">ACC earner levy (${accRateLabel()})</span><span class="row-val c-amber">${fmt(accEarner)}</span></div>
+      <div class="row-item"><span class="row-label">ACC work + Working Safer levy${taxOpts().workLevy?'':' (excludes work levy until you enter your rate)'}</span><span class="row-val c-amber">${fmt(accWork.total)}</span></div>
+      ${slHas?`<div class="row-item"><span class="row-label">Student loan (${taxYearRates().slRate*100}%)</span><span class="row-val c-amber">${fmt(slRepay)}</span></div>`:''}
       <div class="row-item fw" style="font-size:14px;margin-bottom:4px"><span class="row-label fw">Total obligation (estimated)</span><span class="row-val c-red fw">${fmt(estimatedTax+accLevy+slRepay)}</span></div>
       <div class="row-item" style="font-size:11px;color:var(--text3)"><span>Effective tax rate</span><span>${taxable>0?(estimatedTax/taxable*100).toFixed(1)+'%':'—'}</span></div>
       ${provSection}`;
@@ -2730,15 +2811,19 @@ function recalcTax(){
       ${annualInc>=60000?'<div class="info-box">Turnover ≥ $60,000 — GST registration is mandatory.</div>':''}`;
 
   document.getElementById('accSummary').innerHTML=`
-    <div class="row-item"><span class="row-label">Liable earnings</span><span class="row-val">${fmt(Math.min(taxable,152790))}</span></div>
-    <div class="row-item"><span class="row-label">Earner levy (1.67%)</span><span class="row-val c-amber">${fmt(accLevy)}</span></div>
+    <div class="row-item"><span class="row-label">Liable earnings</span><span class="row-val">${fmt(Math.min(taxable,taxYearRates().accCap))}</span></div>
+    <div class="row-item"><span class="row-label">Earner levy (${accRateLabel()})</span><span class="row-val c-amber">${fmt(accEarner)}</span></div>
+    <div class="row-item"><span class="row-label">Work levy (${taxOpts().workLevy?'$'+(+taxOpts().workLevy).toFixed(2)+' per $100':'not set'})</span><span class="row-val c-amber">${fmt(accWork.work)}</span></div>
+    <div class="row-item"><span class="row-label">Working Safer levy ($${(taxYearRates().workSaferRate*100).toFixed(2)} per $100)</span><span class="row-val c-amber">${fmt(accWork.safer)}</span></div>
+    <div class="row-item fw"><span class="row-label fw">Total ACC levies</span><span class="row-val c-amber fw">${fmt(accLevy)}</span></div>
+    ${taxOpts().workLevy?'':'<div class="info-box" style="margin:8px 0">This total doesn\'t include your work levy yet. Enter your rate above once your ACC invoice arrives.</div>'}
     <div class="row-item"><span class="row-label">ACC paid to date</span><span class="row-val c-green">${fmt(accPaid)}</span></div>
     <div class="row-item fw"><span class="row-label fw">ACC still owing</span><span class="row-val ${accLevy-accPaid>0?'c-red':'c-green'} fw">${fmt(Math.max(0,accLevy-accPaid))}</span></div>`;
 
   if(slHas){
     document.getElementById('slSummary').innerHTML=`
-      <div class="row-item"><span class="row-label">Threshold</span><span class="row-val">$24,128</span></div>
-      <div class="row-item fw"><span class="row-label fw">Annual repayment (12%)</span><span class="row-val c-red fw">${fmt(slRepay)}</span></div>`;
+      <div class="row-item"><span class="row-label">Threshold</span><span class="row-val">${fmt(taxYearRates().slThreshold)}</span></div>
+      <div class="row-item fw"><span class="row-label fw">Annual repayment (${taxYearRates().slRate*100}%)</span><span class="row-val c-red fw">${fmt(slRepay)}</span></div>`;
   }
 
   // Home office result on tax page
@@ -2798,7 +2883,7 @@ function renderAccountant(){
   let fyInc=0,fyExp=0; const cats={};
   entries.forEach(e=>{ const a=toFY(e.amount,e.freq,e.date,e.endDate); if(e.type==='income') fyInc+=a; else{fyExp+=a;cats[e.cat]=(cats[e.cat]||0)+a;} });
   let totalDep=0; assets.forEach(a=>totalDep+=calcDepreciation(a).annualDep);
-  const vDed=vehicles.filter(v=>v.method==='mileage').reduce((s,v)=>s+v.km*KM_RATE,0);
+  const vDed=calcMileageDed();
   const invPaid=invoices.filter(i=>i.status==='paid'&&isFY(i.paidDate||i.date)).reduce((s,i)=>s+invPaidNZD(i),0);
   const invOutstanding=invoices.filter(i=>i.status==='unpaid'||i.status==='partial').reduce((s,i)=>s+invBalance(i)*(i.currency==='AUD'?(i.fxRate||1):1),0);
   // FX net
@@ -2828,7 +2913,7 @@ function renderAccountant(){
     <div class="row-item"><span>✓ Bank statements — full FY (1 Apr – 31 Mar)</span></div>
     <div class="row-item"><span>✓ All invoices issued (keep 7 years) — ${invoices.length} in this app</span></div>
     <div class="row-item"><span>✓ Receipts for all deductible expenses (keep 7 years)</span></div>
-    <div class="row-item"><span>✓ Mileage log — ${vehicles.length} trips, ${fmt(vehicles.reduce((s,v)=>s+v.km*KM_RATE,0))} total deduction</span></div>
+    <div class="row-item"><span>✓ Mileage log — ${vehicles.length} trips, ${fmt(calcMileageDed())} total deduction this FY</span></div>
     <div class="row-item"><span>✓ Asset purchase invoices — ${assets.length} assets recorded</span></div>
     <div class="row-item"><span>✓ GST returns for each period (if registered)</span></div>
     <div class="row-item"><span>✓ ACC levy notices</span></div>
@@ -2857,7 +2942,7 @@ function exportCSV(){
   assets.forEach(a=>{ const d=calcDepreciation(a); rows.push([a.name,a.cat,a.cost,a.date,a.method,(a.rate*100).toFixed(1),(a.bizPct*100).toFixed(0),a.boost==='yes'?'Yes':'No',d.annualDep.toFixed(2),d.bookVal.toFixed(2)]); });
   rows.push([]); rows.push(['--- VEHICLE LOG ---']);
   rows.push(['Date','Purpose','km','Method','Deduction']);
-  vehicles.forEach(v=>rows.push([v.date,v.purpose,v.km,'IRD km rate',(v.km*KM_RATE).toFixed(2)]));
+  vehicles.forEach(v=>rows.push([v.date,v.purpose,v.km,'IRD km rate',(mileageAlloc()[v.id]||0).toFixed(2)]));
   if(!vehicles.length) rows.push(['(none recorded)','','','','']);
 
   // Home office lives in its own settings and feeds the tax estimate directly.
@@ -2893,7 +2978,7 @@ function exportCSV(){
 
 // ── Backup & Restore ──
 function backupData(){
-  const backup={version:3,exportedAt:new Date().toISOString(),entries,assets,vehicles,clients,invoices,bizInfo,schedules};
+  const backup={version:3,exportedAt:new Date().toISOString(),entries,assets,vehicles,clients,invoices,bizInfo,schedules,taxOpts:taxOpts()};
   const blob=new Blob([JSON.stringify(backup,null,2)],{type:'application/json'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
   const d=new Date();
@@ -2914,6 +2999,7 @@ function importData(event){
       entries=data.entries||[]; assets=data.assets||[]; vehicles=data.vehicles||[];
       clients=data.clients||[]; invoices=data.invoices||[]; bizInfo=data.bizInfo||{};
       schedules=data.schedules||[];
+      if(data.taxOpts) restoreTaxOpts(data.taxOpts);
       persistLocal();
       renderAll();
       // Force immediate Drive save so the restored data overwrites Drive before any pull can happen
@@ -2958,6 +3044,12 @@ function updateFYBadge(){
   const now=new Date(); const fy=now.getMonth()>=3?now.getFullYear():now.getFullYear()-1;
   const label=`FY ${fy}/${String(fy+1).slice(2)}`;
   document.getElementById('fyBadge').textContent=label;
+  const kb=document.getElementById('kmBadge'); if(kb) kb.textContent=kmRateLabel();
+  const vf=document.getElementById('vFuel'); if(vf) vf.value=taxOpts().fuel;
+  const wl=document.getElementById('accWorkLevy'); if(wl) wl.value=taxOpts().workLevy||'';
+  const sl=document.getElementById('slSummary'); if(sl&&!sl.children.length) sl.textContent=`Repayment: ${taxYearRates().slRate*100}% of income above ${fmt(taxYearRates().slThreshold)}.`;
+  const ai=document.getElementById('accIntro');
+  if(ai) ai.textContent=`Earner's levy (${accRateLabel()}) applies to liable income up to $${taxYearRates().accCap.toLocaleString('en-NZ')} for ${label}.`;
   const tc=document.getElementById('taxCardTitle');
   if(tc) tc.textContent=`Income tax estimate — ${label}`;
 }
@@ -3153,6 +3245,7 @@ async function loadFromDrive(checkConflict){
       invoices  = data.invoices  || [];
       bizInfo   = data.bizInfo   || {};
       schedules = data.schedules || [];
+      if(data.taxOpts) restoreTaxOpts(data.taxOpts);
       // Persist to localStorage as offline cache
       persistLocal();
       processSchedules();
@@ -3181,7 +3274,7 @@ async function doSaveToDrive(){
   try{
     const payload = JSON.stringify({
       version:4, savedAt:new Date().toISOString(),
-      entries, assets, vehicles, clients, invoices, bizInfo, schedules
+      entries, assets, vehicles, clients, invoices, bizInfo, schedules, taxOpts:taxOpts()
     });
     const found = gDriveFileId ? true : await findDriveFile();
     let url, method;
